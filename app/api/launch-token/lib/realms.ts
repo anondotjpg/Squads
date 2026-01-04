@@ -1,4 +1,5 @@
 import { SplGovernance } from 'governance-idl-sdk'
+import type { GovernanceConfig } from 'governance-idl-sdk'
 import {
   Connection,
   Keypair,
@@ -9,6 +10,7 @@ import {
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js'
 import bs58 from 'bs58'
+import BN from 'bn.js'
 
 // SPL Governance Program ID (mainnet)
 const GOVERNANCE_PROGRAM_ID = new PublicKey('GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw')
@@ -18,7 +20,7 @@ const TOKEN_DECIMALS = 9
 
 // Min tokens to create proposal: 100,000 tokens
 const MIN_TOKENS_TO_PROPOSE = 100_000
-const MIN_TOKENS_RAW = BigInt(MIN_TOKENS_TO_PROPOSE) * BigInt(10 ** TOKEN_DECIMALS) // 100,000,000,000,000
+const MIN_TOKENS_RAW = new BN(MIN_TOKENS_TO_PROPOSE).mul(new BN(10).pow(new BN(TOKEN_DECIMALS)))
 
 // Estimated cost to create a DAO (from Realms docs)
 // DAO Creation: ~2 SOL, Metadata: ~0.5 SOL, Treasury: ~0.2 SOL, Voter: ~0.1 SOL
@@ -117,14 +119,14 @@ export async function createRealmsDAO(params: CreateRealmParams): Promise<Create
     // Step 1: Create Realm
     console.log('   Creating realm...')
     const createRealmIx = await splGovernance.createRealmInstruction(
-      realmName,
-      tokenMint, // community token mint
-      1, // min tokens to create governance (1 token = any holder can create)
-      keypair.publicKey, // realm authority
-      undefined, // no max vote weight source override
-      undefined, // no council token
-      'liquid', // community token type - liquid means transferable
-      undefined // no council token config
+      realmName,                    // name
+      tokenMint,                    // communityTokenMint
+      1,                            // minCommunityWeightToCreateGovernance
+      keypair.publicKey,            // payer
+      undefined,                    // communityMintMaxVoterWeightSource (optional)
+      undefined,                    // councilTokenMint (optional - no council)
+      'liquid',                     // communityTokenType
+      undefined,                    // councilTokenType (optional)
     )
 
     // Build and send realm creation transaction
@@ -141,9 +143,20 @@ export async function createRealmsDAO(params: CreateRealmParams): Promise<Create
     )
     console.log(`   ✅ Realm created! Signature: ${realmSignature}`)
 
-    // Step 2: Create Governance (which creates the treasury PDA)
+    // Step 2: Create Token Owner Record (required before creating governance)
+    console.log('   Creating token owner record...')
+    const tokenOwnerRecordAddress = splGovernance.pda.tokenOwnerRecordAccount({
+      realmAccount: realmAddress,
+      governingTokenMintAccount: tokenMint,
+      governingTokenOwner: keypair.publicKey,
+    }).publicKey
+
+    // Note: Token owner record is created automatically when depositing tokens
+    // For realm authority, we can create governance directly
+
+    // Step 3: Create Governance
     console.log('   Creating governance...')
-    console.log(`   Min tokens to propose: ${MIN_TOKENS_TO_PROPOSE} (${MIN_TOKENS_RAW} raw with ${TOKEN_DECIMALS} decimals)`)
+    console.log(`   Min tokens to propose: ${MIN_TOKENS_TO_PROPOSE} (${MIN_TOKENS_RAW.toString()} raw with ${TOKEN_DECIMALS} decimals)`)
     
     // Derive governance address using token mint as seed
     const governanceAddress = splGovernance.pda.governanceAccount({
@@ -152,29 +165,29 @@ export async function createRealmsDAO(params: CreateRealmParams): Promise<Create
     }).publicKey
     console.log(`   Governance Address: ${governanceAddress.toBase58()}`)
 
-    // Create governance instruction
-    // Token holders vote with their tokens, 100k tokens needed to create proposal, 1 day voting
+    // GovernanceConfig with all required fields
+    const governanceConfig: GovernanceConfig = {
+      communityVoteThreshold: { yesVotePercentage: [60] },  // 60% to pass
+      minCommunityWeightToCreateProposal: MIN_TOKENS_RAW,   // 100,000 tokens
+      minTransactionHoldUpTime: 0,                          // no hold up time
+      votingBaseTime: 86400,                                // 1 day in seconds
+      communityVoteTipping: { strict: {} },                 // strict tipping
+      councilVoteThreshold: { disabled: {} },               // no council
+      councilVetoVoteThreshold: { disabled: {} },           // no council veto
+      minCouncilWeightToCreateProposal: new BN(0),          // no council
+      councilVoteTipping: { disabled: {} },                 // no council
+      communityVetoVoteThreshold: { disabled: {} },         // no community veto
+      votingCoolOffTime: 0,                                 // no cool off
+      depositExemptProposalCount: 10,                       // exempt first 10 proposals from deposit
+    }
+
     const createGovernanceIx = await splGovernance.createGovernanceInstruction(
-      realmAddress,
-      tokenMint, // seed for governance (using token mint)
-      {
-        communityVoteThreshold: { type: 'yesVotePercentage', percentage: 60 }, // 60% to pass
-        minCommunityTokensToCreateProposal: Number(MIN_TOKENS_RAW), // 100,000 tokens with 9 decimals
-        minInstructionHoldUpTime: 0, // no hold up time
-        baseVotingTime: 86400, // 1 day in seconds (24 * 60 * 60)
-        communityVoteTipping: 'strict', // strict tipping
-        councilVoteThreshold: { type: 'disabled' },
-        councilVetoVoteThreshold: { type: 'disabled' },
-        minCouncilTokensToCreateProposal: 0,
-        councilVoteTipping: 'disabled',
-        communityVetoVoteThreshold: { type: 'disabled' },
-        votingCoolOffTime: 0,
-        depositExemptProposalCount: 10,
-      },
-      keypair.publicKey, // payer
-      keypair.publicKey, // governance authority (token owner record not needed for realm authority)
-      undefined, // voter weight record
-      undefined // max voter weight record
+      governanceConfig,             // config (first parameter!)
+      realmAddress,                 // realmAccount
+      keypair.publicKey,            // governanceAuthority (realm authority)
+      undefined,                    // tokenOwnerRecord (undefined = use realm authority)
+      keypair.publicKey,            // payer
+      tokenMint,                    // governanceAccountSeed (use token mint as seed)
     )
 
     const governanceTx = new Transaction().add(createGovernanceIx)
@@ -190,7 +203,7 @@ export async function createRealmsDAO(params: CreateRealmParams): Promise<Create
     )
     console.log(`   ✅ Governance created! Signature: ${govSignature}`)
 
-    // Step 3: Create Native Treasury
+    // Step 4: Create Native Treasury
     console.log('   Creating native treasury...')
     
     const nativeTreasuryAddress = splGovernance.pda.nativeTreasuryAccount({
@@ -199,8 +212,8 @@ export async function createRealmsDAO(params: CreateRealmParams): Promise<Create
     console.log(`   Treasury Address: ${nativeTreasuryAddress.toBase58()}`)
 
     const createTreasuryIx = await splGovernance.createNativeTreasuryInstruction(
-      governanceAddress,
-      keypair.publicKey // payer
+      governanceAddress,            // governanceAccount
+      keypair.publicKey             // payer
     )
 
     const treasuryTx = new Transaction().add(createTreasuryIx)
