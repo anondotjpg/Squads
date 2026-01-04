@@ -1,10 +1,12 @@
 'use client';
 
-import { useState, useRef, ChangeEvent } from 'react';
+import { useState, useRef, useEffect, ChangeEvent } from 'react';
 import { Win95Button } from './Win95UI';
 
 const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB
 const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
+const RATE_LIMIT_KEY = 'lastTokenLaunch';
+const RATE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 interface FormData {
   name: string;
@@ -14,7 +16,7 @@ interface FormData {
   twitterUrl: string;
   websiteUrl: string;
   telegramUrl: string;
-  initialBuyAmountSol: string; // always "0"
+  initialBuyAmountSol: string;
 }
 
 interface CreateTokenFormProps {
@@ -22,10 +24,30 @@ interface CreateTokenFormProps {
   isLoading: boolean;
 }
 
+function getTimeUntilNextLaunch(): number | null {
+  if (typeof window === 'undefined') return null;
+  const lastLaunch = localStorage.getItem(RATE_LIMIT_KEY);
+  if (!lastLaunch) return null;
+  
+  const elapsed = Date.now() - parseInt(lastLaunch, 10);
+  const remaining = RATE_LIMIT_MS - elapsed;
+  return remaining > 0 ? remaining : null;
+}
+
+function formatTimeRemaining(ms: number): string {
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+  const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
 export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenFormProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [cooldownRemaining, setCooldownRemaining] = useState<number | null>(null);
 
   const [formData, setFormData] = useState<FormData>({
     name: '',
@@ -35,17 +57,26 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
     twitterUrl: '',
     websiteUrl: '',
     telegramUrl: '',
-    initialBuyAmountSol: '0', // 🔒 hard-locked
+    initialBuyAmountSol: '0',
   });
+
+  // Check rate limit on mount and update countdown
+  useEffect(() => {
+    const checkCooldown = () => {
+      const remaining = getTimeUntilNextLaunch();
+      setCooldownRemaining(remaining);
+    };
+
+    checkCooldown();
+    const interval = setInterval(checkCooldown, 60000); // Update every minute
+    return () => clearInterval(interval);
+  }, []);
 
   const handleInputChange = (
     e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
   ) => {
     const { name, value } = e.target;
-
-    // 🔒 Dev buy can NEVER change
     if (name === 'initialBuyAmountSol') return;
-
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
@@ -92,11 +123,26 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // 🔐 Absolute guarantee on submit
-    await onSubmit({
-      ...formData,
-      initialBuyAmountSol: '0',
-    });
+    // Check rate limit before submitting
+    const remaining = getTimeUntilNextLaunch();
+    if (remaining) {
+      setCooldownRemaining(remaining);
+      return;
+    }
+
+    try {
+      await onSubmit({
+        ...formData,
+        initialBuyAmountSol: '0',
+      });
+
+      // Record successful launch timestamp
+      localStorage.setItem(RATE_LIMIT_KEY, Date.now().toString());
+      setCooldownRemaining(RATE_LIMIT_MS);
+    } catch (error) {
+      // Don't set rate limit if launch failed
+      console.error('Launch failed:', error);
+    }
   };
 
   const inputStyle: React.CSSProperties = {
@@ -118,8 +164,26 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
     marginBottom: '12px',
   };
 
+  const isRateLimited = cooldownRemaining !== null && cooldownRemaining > 0;
+
   return (
     <form onSubmit={handleSubmit}>
+      {/* Rate Limit Warning */}
+      {isRateLimited && (
+        <div
+          style={{
+            padding: '8px 12px',
+            marginBottom: '12px',
+            backgroundColor: '#ffffcc',
+            border: '2px solid #808080',
+            borderStyle: 'inset',
+          }}
+        >
+          ⏰ You can launch another token in{' '}
+          <strong>{formatTimeRemaining(cooldownRemaining)}</strong>
+        </div>
+      )}
+
       {/* Image Upload */}
       <div style={fieldGroupStyle}>
         <label style={labelStyle}>Token Image *</label>
@@ -129,6 +193,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
           accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
           onChange={handleFileChange}
           style={{ display: 'none' }}
+          disabled={isRateLimited}
         />
 
         {imagePreview ? (
@@ -151,6 +216,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
                 label="Remove"
                 onClick={handleRemoveImage}
                 type="button"
+                disabled={isRateLimited}
               />
             </div>
           </div>
@@ -159,6 +225,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
             label="Choose Image..."
             onClick={() => fileInputRef.current?.click()}
             type="button"
+            disabled={isRateLimited}
           />
         )}
 
@@ -183,6 +250,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
           placeholder="My Squad"
           style={inputStyle}
           required
+          disabled={isRateLimited}
         />
       </div>
 
@@ -198,6 +266,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
           maxLength={10}
           style={inputStyle}
           required
+          disabled={isRateLimited}
         />
       </div>
 
@@ -212,6 +281,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
           rows={3}
           style={{ ...inputStyle, resize: 'vertical' }}
           required
+          disabled={isRateLimited}
         />
       </div>
 
@@ -230,6 +300,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
             onChange={handleInputChange}
             placeholder="https://twitter.com/..."
             style={inputStyle}
+            disabled={isRateLimited}
           />
         </div>
 
@@ -242,6 +313,7 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
             onChange={handleInputChange}
             placeholder="https://..."
             style={inputStyle}
+            disabled={isRateLimited}
           />
         </div>
 
@@ -254,15 +326,22 @@ export default function CreateTokenForm({ onSubmit, isLoading }: CreateTokenForm
             onChange={handleInputChange}
             placeholder="https://t.me/..."
             style={inputStyle}
+            disabled={isRateLimited}
           />
         </div>
       </details>
 
       {/* Submit */}
       <Win95Button
-        label={isLoading ? 'Launching...' : 'Launch Token'}
+        label={
+          isRateLimited
+            ? `Wait ${formatTimeRemaining(cooldownRemaining)}`
+            : isLoading
+            ? 'Launching...'
+            : 'Launch Token'
+        }
         type="submit"
-        disabled={isLoading || !formData.imageFile}
+        disabled={isLoading || !formData.imageFile || isRateLimited}
       />
     </form>
   );
