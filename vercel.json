@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/claim-fees",
+      "schedule": "0 */6 * * *"
+    }
+  ]
+}
