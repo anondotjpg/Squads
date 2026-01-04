@@ -158,7 +158,7 @@ async function createTokenInfoWithUpload(
   const formData = new FormData()
 
   // Create a Blob from the buffer for the image field
-  const imageBlob = new Blob([params.imageBuffer], { type: params.imageMimeType })
+  const imageBlob = new Blob([new Uint8Array(params.imageBuffer)], { type: params.imageMimeType })
   formData.append('image', imageBlob, `token-image.${ext}`)
 
   // Append other fields
